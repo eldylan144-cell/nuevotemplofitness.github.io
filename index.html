@@ -1,0 +1,507 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  deleteDoc, 
+  updateDoc,
+  getDoc,
+  addDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  ScanLine, 
+  Trash2, 
+  Search,
+  ShieldCheck,
+  Clock,
+  Loader2,
+  ArrowRight,
+  Database,
+  DollarSign,
+  CheckCircle2,
+  BellRing,
+  Users,
+  LayoutDashboard,
+  PlusCircle,
+  LogOut,
+  CreditCard,
+  AlertTriangle,
+  XCircle,
+  Dumbbell,
+  ExternalLink
+} from 'lucide-react';
+
+// ==========================================
+// CONFIGURACIÓN DE ENLACE DE RUTINAS
+// ==========================================
+const URL_RUTINAS = "https://eldylan144-cell.github.io/rutinatemplo.github.io/"; 
+
+// --- CONFIGURACIÓN DE FIREBASE ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'templo-fitness-final';
+
+// --- UTILIDADES ---
+const formatDNI = (value) => {
+  const digits = value.replace(/\D/g, '');
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+};
+
+const formatCurrency = (value) => {
+  if (!value && value !== 0) return "";
+  const digits = value.toString().replace(/\D/g, '');
+  if (!digits) return "";
+  return new Intl.NumberFormat('es-AR', {
+    style: 'currency',
+    currency: 'ARS',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(digits);
+};
+
+const getRawNumber = (formattedValue) => {
+  if (!formattedValue) return "0";
+  return formattedValue.toString().replace(/\D/g, '');
+};
+
+const FULL_MONTHS = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState('selector'); 
+  const [adminTab, setAdminTab] = useState('dashboard');
+  const [members, setMembers] = useState([]);
+  const [todayAttendance, setTodayAttendance] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [pendingPayments, setPendingPayments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [successMessage, setSuccessMessage] = useState(null);
+  const [editableAmounts, setEditableAmounts] = useState({});
+  const [dniInput, setDniInput] = useState('');
+  const [checkResult, setCheckResult] = useState(null);
+  const [flashType, setFlashType] = useState(null); 
+  const [searchTerm, setSearchTerm] = useState('');
+  const [passInput, setPassInput] = useState('');
+  const [loginError, setLoginError] = useState(false);
+  
+  const [showConfirmNewMember, setShowConfirmNewMember] = useState(false);
+
+  const TRANSFER_DATA = {
+    alias: "dylanlionel.amend",
+    nombre: "Dylan Lionel Amend",
+    cuit: "20-44.867.316-3"
+  };
+
+  const [newMember, setNewMember] = useState({ 
+    name: '', dni: '', amount: '', daysPerWeek: 'Libre', birthdate: '' 
+  });
+
+  const currentYear = new Date().getFullYear();
+  const currentMonthIdx = new Date().getMonth();
+  const [selectedMonthTab] = useState(currentMonthIdx);
+
+  const ADMIN_PASSWORD = "5544"; 
+  const audioCtx = useRef(null);
+
+  const stats = useMemo(() => {
+    const targetMonthStr = `${currentYear}-${String(selectedMonthTab + 1).padStart(2, '0')}`;
+    const monthlyPayments = payments.filter(p => p.month === targetMonthStr);
+    const monthlyRevenue = monthlyPayments.reduce((acc, p) => acc + (parseFloat(p.amount) || 0), 0);
+    const activeMembers = members.filter(m => new Date(m.expirationDate) >= new Date()).length;
+    return { monthlyRevenue, activeMembers, totalMembers: members.length };
+  }, [members, payments, selectedMonthTab, currentYear]);
+
+  const playSound = (type) => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.current.createOscillator();
+      const gain = audioCtx.current.createGain();
+      osc.connect(gain); gain.connect(audioCtx.current.destination);
+      if (type === 'success') {
+        osc.frequency.setValueAtTime(880, audioCtx.current.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.current.currentTime + 0.3);
+      } else if (type === 'error') {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, audioCtx.current.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.current.currentTime + 0.5);
+      }
+      osc.start(); osc.stop(audioCtx.current.currentTime + 0.5);
+    } catch (e) {}
+  };
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else { await signInAnonymously(auth); }
+      } catch (error) { console.error("Auth error:", error); }
+    };
+    initAuth();
+    onAuthStateChanged(auth, u => { if (u) setUser(u); });
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    const unsubM = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'members'), (snap) => {
+      setMembers(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+      setLoading(false);
+    });
+    const todayStr = new Date().toISOString().split('T')[0];
+    const unsubA = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'attendance'), snap => {
+      setTodayAttendance(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(a => a.date === todayStr).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
+    });
+    const unsubP = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), snap => {
+      setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    const unsubPend = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'pending_payments'), snap => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setPendingPayments(data);
+      const newAm = {}; data.forEach(p => { newAm[p.id] = formatCurrency(p.amount); });
+      setEditableAmounts(prev => ({ ...newAm, ...prev }));
+    });
+    return () => { unsubM(); unsubA(); unsubP(); unsubPend(); };
+  }, [user]);
+
+  const handleLogout = () => { setPassInput(''); setLoginError(false); setView('selector'); };
+
+  const handleCheckIn = async (e) => {
+    e.preventDefault();
+    if (!user || isValidating || !dniInput.trim()) return;
+    setIsValidating(true); setCheckResult(null);
+    const rawDni = getRawNumber(dniInput); 
+    setDniInput('');
+    await new Promise(r => setTimeout(r, 400));
+    const member = members.find(m => getRawNumber(m.dni) === rawDni);
+    if (!member) {
+      playSound('error'); setFlashType('error');
+      setCheckResult({ status: 'error', message: 'No registrado', memberName: 'DNI ' + formatDNI(rawDni) });
+      setTimeout(() => setFlashType(null), 800);
+    } else {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'attendance', `${getRawNumber(member.dni)}_${todayStr}`);
+      const snap = await getDoc(docRef);
+      const expDate = new Date(member.expirationDate);
+      if (snap.exists()) {
+        playSound('error'); setCheckResult({ status: 'warning', message: 'Ya ingresó hoy', memberName: member.name });
+      } else if (expDate < new Date()) {
+        playSound('error'); setCheckResult({ status: 'warning', message: 'Cuota vencida', memberName: member.name, canPay: true, memberData: member });
+      } else {
+        playSound('success'); setFlashType('success');
+        await setDoc(docRef, { dni: member.dni, name: member.name, timestamp: new Date().toISOString(), date: todayStr });
+        setCheckResult({ status: 'success', message: "¡Buen entrenamiento!", memberName: member.name });
+        setTimeout(() => setFlashType(null), 1000);
+      }
+    }
+    setIsValidating(false);
+    if (!checkResult?.canPay) setTimeout(() => setCheckResult(null), 6000);
+  };
+
+  const requestPayment = async (member) => {
+    if (!user) return;
+    setIsValidating(true);
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'pending_payments'), {
+      memberId: member.id, memberName: member.name, amount: getRawNumber(member.amount), dni: member.dni, timestamp: new Date().toISOString()
+    });
+    setCheckResult({ status: 'success', message: "Aviso enviado", memberName: "Pasa por recepción" });
+    setIsValidating(false);
+    setTimeout(() => setCheckResult(null), 4000);
+  };
+
+  const confirmPendingPayment = async (pendingPay) => {
+    if (!user) return;
+    try {
+      const memberRef = doc(db, 'artifacts', appId, 'public', 'data', 'members', pendingPay.memberId);
+      const now = new Date();
+      let newExp = new Date();
+      newExp.setDate(newExp.getDate() + 30);
+      newExp.setHours(12, 0, 0, 0);
+      const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const finalAmount = parseFloat(getRawNumber(editableAmounts[pendingPay.id])) || 0;
+      await updateDoc(memberRef, { expirationDate: newExp.toISOString() });
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), {
+        memberId: pendingPay.memberId, memberName: pendingPay.memberName, amount: finalAmount, month: currentMonthStr, timestamp: now.toISOString(), type: 'RENOVACION'
+      });
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'pending_payments', pendingPay.id));
+      playSound('success'); setSuccessMessage("Pago confirmado exitosamente");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (e) { console.error(e); }
+  };
+
+  const finalizeNewMemberRegistration = async () => {
+    if (!user || isSaving) return;
+    setIsSaving(true);
+    try {
+      const id = crypto.randomUUID();
+      const now = new Date();
+      let exp = new Date(now);
+      exp.setDate(exp.getDate() + 30);
+      exp.setHours(12, 0, 0, 0);
+      const cleanAmount = getRawNumber(newMember.amount);
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', id), {
+        ...newMember, amount: cleanAmount, name: newMember.name.toUpperCase(), expirationDate: exp.toISOString(), createdAt: now.toISOString()
+      });
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'payments'), {
+        memberId: id, memberName: newMember.name.toUpperCase(), amount: parseFloat(cleanAmount) || 0, 
+        month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`, timestamp: now.toISOString(), type: 'ALTA'
+      });
+      setSuccessMessage("Socio y Pago registrados correctamente");
+      setNewMember({ name: '', dni: '', amount: '', daysPerWeek: 'Libre', birthdate: '' });
+      setShowConfirmNewMember(false);
+      setAdminTab('members');
+      playSound('success');
+    } catch (e) { console.error(e); }
+    setIsSaving(false);
+    setTimeout(() => setSuccessMessage(null), 3000);
+  };
+
+  const Logo = ({ size = "normal" }) => (
+    <div className={`flex flex-col items-center select-none ${size === 'small' ? 'scale-50 origin-left' : ''}`}>
+      <p className="italic font-bold text-gray-500 text-sm tracking-[0.3em] uppercase leading-none">Nuevo</p>
+      <p className="font-black text-white text-5xl leading-none my-1 tracking-tighter italic"><span className="text-blue-500">TEM</span>PLO</p>
+      <div className="flex items-center gap-2 w-full"><div className="h-[2px] bg-blue-500 flex-grow"></div><p className="italic font-black text-white text-xl leading-none uppercase">Fitness</p><div className="h-[2px] bg-blue-500 flex-grow"></div></div>
+    </div>
+  );
+
+  if (loading && !user) return (
+    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center space-y-4">
+      <Loader2 className="animate-spin text-blue-500" size={48} /><p className="text-blue-500 font-black italic uppercase tracking-widest">Iniciando Terminal...</p>
+    </div>
+  );
+
+  if (view === 'selector') return (
+    <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-6 gap-16">
+      <Logo />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl">
+        <button onClick={() => setView('ingreso')} className="bg-blue-600 p-12 rounded-[3.5rem] text-white hover:bg-blue-700 transition-all shadow-xl group">
+          <ScanLine size={48} className="mb-4 group-hover:rotate-12 transition-transform" /><span className="text-4xl font-black italic uppercase block">Entrada</span>
+        </button>
+        <button onClick={() => setView('login')} className="relative bg-gray-900 border-4 border-gray-800 p-12 rounded-[3.5rem] text-white hover:border-blue-500 transition-all group">
+          {pendingPayments.length > 0 && <div className="absolute -top-4 -right-4 bg-rose-600 w-12 h-12 rounded-full flex items-center justify-center animate-bounce shadow-lg border-4 border-gray-950"><span className="font-black">{pendingPayments.length}</span></div>}
+          <ShieldCheck size={48} className="mb-4 text-blue-500 group-hover:scale-110 transition-transform" /><span className="text-4xl font-black italic uppercase block">Gestión</span>
+        </button>
+      </div>
+    </div>
+  );
+
+  if (view === 'login') return (
+    <div className="min-h-screen bg-gray-950 flex items-center justify-center p-6">
+      <div className={`max-w-md w-full border-4 ${loginError ? 'border-rose-600' : 'border-blue-600'} rounded-[3rem] p-10 bg-gray-900 shadow-2xl`}>
+        <div className="mb-8 scale-75"><Logo /></div>
+        <form onSubmit={(e) => { e.preventDefault(); if(passInput === ADMIN_PASSWORD) setView('gestion'); else setLoginError(true); }} className="space-y-4">
+          <input type="password" value={passInput} onChange={e => setPassInput(e.target.value)} placeholder="PIN DE ACCESO" className="w-full bg-gray-800 text-white py-5 text-center rounded-2xl font-black text-2xl outline-none border-2 border-transparent focus:border-blue-500" autoFocus />
+          <button className="w-full bg-blue-600 text-white py-4 rounded-xl font-black uppercase hover:bg-blue-700">Entrar</button>
+          <button type="button" onClick={() => { setPassInput(''); setLoginError(false); setView('selector'); }} className="w-full text-gray-500 text-xs font-black uppercase mt-4">Volver</button>
+        </form>
+      </div>
+    </div>
+  );
+
+  if (view === 'ingreso') return (
+    <div className={`min-h-screen bg-gray-950 flex flex-col transition-all duration-300 ${flashType === 'success' ? 'bg-blue-900/10' : flashType === 'error' ? 'bg-rose-900/10' : ''}`}>
+      <header className="p-6 border-b border-gray-900 flex justify-between items-center px-10"><Logo size="small" /><button onClick={() => setView('selector')} className="text-blue-500 font-black italic border-2 border-blue-500 px-6 py-2 rounded-full hover:bg-blue-500 hover:text-white uppercase text-xs">Cerrar Terminal</button></header>
+      <main className="flex-grow grid grid-cols-1 lg:grid-cols-12 p-8 gap-8">
+        <div className={`lg:col-span-7 bg-gray-900 rounded-[3.5rem] p-12 flex flex-col items-center justify-center text-center border-2 transition-all ${flashType === 'success' ? 'border-blue-500' : flashType === 'error' ? 'border-rose-600' : 'border-gray-800'}`}>
+          <h2 className="text-5xl font-black italic text-white mb-10 uppercase tracking-tighter">IDENTIFÍCATE</h2>
+          <form onSubmit={handleCheckIn} className="w-full max-w-md space-y-8">
+            <input type="text" inputMode="numeric" value={dniInput} onChange={e => setDniInput(formatDNI(e.target.value))} className="w-full text-7xl font-black text-center border-b-8 outline-none pb-4 bg-transparent text-white border-blue-600 focus:border-blue-400" placeholder="0.000" autoFocus />
+            <button disabled={isValidating || !dniInput} className="w-full bg-blue-600 text-white py-6 rounded-2xl font-black text-2xl uppercase italic flex items-center justify-center gap-4 hover:bg-blue-500 transition-all">{isValidating ? <Loader2 className="animate-spin" /> : <>INGRESAR <ArrowRight /></>}</button>
+          </form>
+          <div className="h-48 mt-8 w-full flex items-center justify-center">
+            {checkResult && (
+              <div className={`w-full max-w-md p-8 rounded-[2rem] border-4 animate-in zoom-in duration-300 ${checkResult.status === 'success' ? 'bg-blue-900/20 border-blue-500 text-blue-100' : 'bg-rose-900/20 border-rose-600 text-rose-100'}`}>
+                <p className="text-xs font-black uppercase tracking-widest mb-1 opacity-70">{checkResult.message}</p>
+                <p className="font-black uppercase italic text-2xl mb-4">{checkResult.memberName}</p>
+                {checkResult.canPay && <button onClick={() => requestPayment(checkResult.memberData)} className="bg-white text-rose-600 px-8 py-3 rounded-xl font-black uppercase text-xs flex items-center gap-2 mx-auto hover:scale-105 transition-transform"><DollarSign size={16} /> Avisar Pago en Caja</button>}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="lg:col-span-5 flex flex-col gap-6">
+          <div className="bg-gray-900 rounded-[3.5rem] p-8 border border-gray-800 flex flex-col overflow-hidden h-1/2">
+            <div className="flex items-center justify-between mb-4 border-b border-gray-800 pb-4"><h3 className="text-[10px] font-black uppercase text-gray-500 flex items-center gap-2"><Clock size={14}/> Hoy en el Templo</h3><span className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded-full text-xs font-black">{todayAttendance.length}</span></div>
+            <div className="space-y-2 overflow-y-auto pr-2 flex-grow">
+              {todayAttendance.map((a) => (<div key={a.id} className="bg-gray-800/40 p-4 rounded-2xl flex justify-between items-center border border-gray-800/50"><p className="font-black uppercase text-white text-xs italic">{a.name}</p><p className="text-blue-500 font-bold text-[10px]">{new Date(a.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p></div>))}
+              {todayAttendance.length === 0 && <p className="text-gray-700 text-center py-4 font-black text-[10px] uppercase italic">Esperando ingresos...</p>}
+            </div>
+          </div>
+          <div className="bg-blue-900/10 rounded-[3.5rem] p-8 border-2 border-blue-500/20 flex flex-col justify-center flex-grow">
+            <div className="flex items-center gap-3 mb-6"><CreditCard className="text-blue-500" size={24} /><h3 className="text-sm font-black uppercase text-white italic tracking-tighter">Datos de Pago</h3></div>
+            <div className="space-y-4">
+              <div className="bg-gray-900/50 p-4 rounded-2xl border border-blue-500/10"><p className="text-[9px] font-black text-blue-500 uppercase mb-1">Alias de transferencia</p><p className="text-lg font-black text-white italic tracking-tight">{TRANSFER_DATA.alias}</p></div>
+              <div className="px-4"><p className="text-[9px] font-black text-gray-500 uppercase mb-0.5">Titular</p><p className="text-xs font-black text-gray-300 uppercase italic">{TRANSFER_DATA.nombre}</p><p className="text-[9px] font-bold text-gray-600 uppercase mt-2">CUIT: {TRANSFER_DATA.cuit}</p></div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+
+  if (view === 'gestion') {
+    const filteredMembers = members.filter(m => m.name?.toLowerCase().includes(searchTerm.toLowerCase()) || m.dni?.includes(searchTerm));
+    return (
+      <div className="min-h-screen bg-gray-950 flex flex-col lg:flex-row">
+        {showConfirmNewMember && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <div className="bg-gray-900 border-4 border-blue-600 rounded-[3rem] p-10 max-w-md w-full shadow-2xl animate-in zoom-in duration-300">
+              <div className="flex justify-between items-start mb-6">
+                <div className="bg-blue-600/20 p-4 rounded-3xl"><DollarSign className="text-blue-500" size={32} /></div>
+                <button onClick={() => setShowConfirmNewMember(false)} className="text-gray-500 hover:text-white"><XCircle size={24}/></button>
+              </div>
+              <h3 className="text-2xl font-black text-white uppercase italic mb-2 tracking-tighter">Confirmar Cobro</h3>
+              <p className="text-gray-400 text-sm font-bold mb-8">¿Confirmas que recibiste el pago de <span className="text-green-500 font-black">{newMember.amount}</span> para dar de alta a <span className="text-white uppercase">{newMember.name}</span>?</p>
+              <div className="space-y-4">
+                <button disabled={isSaving} onClick={finalizeNewMemberRegistration} className="w-full bg-green-600 text-white py-5 rounded-2xl font-black italic uppercase text-lg shadow-xl shadow-green-900/20 hover:bg-green-500 flex items-center justify-center gap-3">
+                  {isSaving ? <Loader2 className="animate-spin"/> : <>SÍ, COBRADO <CheckCircle2 /></>}
+                </button>
+                <button onClick={() => setShowConfirmNewMember(false)} className="w-full text-gray-500 font-black uppercase text-xs py-2">Cancelar registro</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <nav className="w-full lg:w-64 bg-gray-900 border-r border-gray-800 flex flex-col">
+          <div className="p-8 border-b border-gray-800"><Logo size="small" /></div>
+          <div className="flex-grow p-4 space-y-2 py-6">
+            {[
+              { id: 'dashboard', icon: LayoutDashboard, label: 'Resumen' },
+              { id: 'members', icon: Users, label: 'Socios' },
+              { id: 'add', icon: PlusCircle, label: 'Nuevo Socio' },
+              { id: 'database', icon: Database, label: 'Ajustes BD' }
+            ].map(tab => (
+              <button key={tab.id} onClick={() => setAdminTab(tab.id)} className={`w-full flex items-center gap-4 px-6 py-4 rounded-xl font-black text-xs uppercase transition-all ${adminTab === tab.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-gray-500 hover:bg-gray-800'}`}>
+                <tab.icon size={18} /> {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="p-6 border-t border-gray-800"><button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 text-rose-500 font-black text-xs uppercase py-3 rounded-xl border border-rose-900/30 hover:bg-rose-900/10 transition-all"><LogOut size={14} /> Salir</button></div>
+        </nav>
+
+        <main className="flex-grow overflow-y-auto p-6 lg:p-12 relative">
+          {successMessage && (
+            <div className="fixed top-8 right-8 z-50 bg-green-600 text-white px-6 py-4 rounded-xl flex items-center gap-3 shadow-2xl animate-in slide-in-from-right-4">
+              <CheckCircle2 size={20} /> <span className="font-bold text-sm uppercase italic">{successMessage}</span>
+            </div>
+          )}
+
+          <div className="mb-10">
+            <p className="text-blue-500 font-black text-xs uppercase tracking-widest mb-1">Templo Fitness</p>
+            <h1 className="text-4xl font-black text-white italic uppercase tracking-tighter">Administración</h1>
+          </div>
+
+          {adminTab === 'dashboard' && (
+            <div className="space-y-10 animate-in fade-in duration-500">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div className="bg-gray-900 p-8 rounded-[2.5rem] border border-gray-800"><h3 className="text-gray-500 text-[10px] font-black uppercase mb-2 tracking-widest">Recaudación {FULL_MONTHS[selectedMonthTab]}</h3><p className="text-4xl font-black text-white italic">${stats.monthlyRevenue.toLocaleString()}</p></div>
+                <div className="bg-gray-900 p-8 rounded-[2.5rem] border border-gray-800"><h3 className="text-gray-500 text-[10px] font-black uppercase mb-2 tracking-widest">Socios Activos</h3><p className="text-4xl font-black text-white italic">{stats.activeMembers} / {stats.totalMembers}</p></div>
+                <div className="bg-blue-900/20 p-8 rounded-[2.5rem] border border-blue-500/30"><h3 className="text-blue-400 text-[10px] font-black uppercase mb-2 tracking-widest">Asistencia Hoy</h3><p className="text-4xl font-black text-white italic">{todayAttendance.length}</p></div>
+                
+                {/* BOTÓN ÚNICO DE RUTINAS (ACCESO DIRECTO) */}
+                <a 
+                  href={URL_RUTINAS} 
+                  target="file:///C:/Users/eldyl/Desktop/rutina.html" 
+                  rel="noopener noreferrer" 
+                  className="bg-emerald-600 p-8 rounded-[2.5rem] text-white hover:bg-emerald-500 transition-all group flex flex-col justify-center relative overflow-hidden shadow-lg shadow-emerald-900/20"
+                >
+                  <Dumbbell size={40} className="mb-2 group-hover:rotate-12 transition-transform" />
+                  <h3 className="text-[10px] font-black uppercase tracking-widest opacity-80">Gestión de</h3>
+                  <p className="text-3xl font-black italic uppercase leading-none">Rutinas</p>
+                  <ExternalLink size={16} className="absolute top-8 right-8 opacity-50" />
+                </a>
+              </div>
+              
+              <div className={`p-10 rounded-[2.5rem] border-2 transition-all ${pendingPayments.length > 0 ? 'bg-rose-900/5 border-rose-500/20' : 'bg-gray-900 border-gray-800 opacity-60'}`}>
+                <h3 className="font-black text-white uppercase text-lg tracking-tighter flex items-center gap-3 italic mb-8"><BellRing className={pendingPayments.length > 0 ? 'text-rose-500 animate-pulse' : 'text-gray-500'} /> Pagos Pendientes de Cobro</h3>
+                {pendingPayments.length === 0 ? (<p className="text-gray-600 font-black uppercase text-center py-6 italic text-sm">Sin cobros pendientes</p>) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {pendingPayments.map(pay => (
+                      <div key={pay.id} className="bg-gray-950 border border-gray-800 p-6 rounded-3xl flex flex-col gap-5">
+                        <div><p className="text-white font-black uppercase text-sm italic">{pay.memberName}</p><p className="text-gray-500 font-bold text-[9px] uppercase">DNI: {pay.dni}</p></div>
+                        <input type="text" value={editableAmounts[pay.id] || ''} onChange={(e) => setEditableAmounts(prev => ({ ...prev, [pay.id]: formatCurrency(e.target.value) }))} className="bg-gray-900 text-white font-black text-xl p-3 rounded-xl outline-none border border-gray-800 focus:border-blue-500" />
+                        <button onClick={() => confirmPendingPayment(pay)} className="w-full bg-green-600 text-white py-3 rounded-xl font-black uppercase text-xs italic hover:bg-green-500">Confirmar Pago</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {adminTab === 'members' && (
+            <div className="space-y-6 animate-in fade-in duration-500">
+              <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                <h2 className="text-3xl font-black text-white italic uppercase tracking-tighter">Listado de Socios</h2>
+                <div className="relative w-full md:w-80"><Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" /><input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="BUSCAR POR NOMBRE O DNI..." className="w-full bg-gray-900 text-white pl-10 pr-4 py-3 rounded-xl outline-none text-xs font-bold border border-gray-800 focus:border-blue-500 uppercase italic" /></div>
+              </div>
+              <div className="bg-gray-900 rounded-[2.5rem] border border-gray-800 overflow-hidden shadow-xl">
+                <table className="w-full text-left">
+                  <thead className="bg-gray-800 text-gray-400 text-[10px] font-black uppercase tracking-widest"><tr><th className="px-8 py-4">Socio</th><th className="px-8 py-4">Plan / Cuota</th><th className="px-8 py-4">Vencimiento</th></tr></thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {filteredMembers.map(m => (
+                      <tr key={m.id} className="hover:bg-white/[0.01] transition-colors">
+                        <td className="px-8 py-5"><p className="font-black uppercase text-white text-xs italic">{m.name}</p><p className="text-[9px] font-bold text-gray-600">DNI: {m.dni}</p></td>
+                        <td className="px-8 py-5"><p className="text-green-500 font-black text-xs">{formatCurrency(m.amount)}</p><p className="text-gray-600 font-bold text-[9px] uppercase">{m.daysPerWeek}</p></td>
+                        <td className="px-8 py-5"><p className={`font-black text-[10px] uppercase italic ${new Date(m.expirationDate) < new Date() ? 'text-rose-500' : 'text-blue-500'}`}>{new Date(m.expirationDate).toLocaleDateString()}</p></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {adminTab === 'add' && (
+            <div className="max-w-xl mx-auto animate-in slide-in-from-bottom-4">
+              <div className="bg-gray-900 p-10 rounded-[3rem] border border-gray-800">
+                <h2 className="text-2xl font-black text-white italic uppercase text-center mb-8">Nuevo Socio</h2>
+                <form onSubmit={(e) => { e.preventDefault(); setShowConfirmNewMember(true); }} className="space-y-6">
+                  <div className="space-y-1"><label className="text-[10px] font-black text-gray-500 uppercase px-2">Nombre Completo</label><input required value={newMember.name} onChange={e => setNewMember({...newMember, name: e.target.value})} className="w-full bg-gray-800 text-white p-4 rounded-xl font-bold border border-transparent focus:border-blue-500 outline-none uppercase italic" /></div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1"><label className="text-[10px] font-black text-gray-500 uppercase px-2">DNI</label><input required value={newMember.dni} onChange={e => setNewMember({...newMember, dni: formatDNI(e.target.value)})} className="w-full bg-gray-800 text-white p-4 rounded-xl font-bold outline-none" placeholder="0.000.000" /></div>
+                    <div className="space-y-1"><label className="text-[10px] font-black text-gray-500 uppercase px-2">Valor Cuota</label><input required value={newMember.amount} onChange={e => setNewMember({...newMember, amount: formatCurrency(e.target.value)})} className="w-full bg-gray-800 text-white p-4 rounded-xl font-bold outline-none text-green-500" placeholder="$0" /></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1"><label className="text-[10px] font-black text-gray-500 uppercase px-2">Plan</label><select value={newMember.daysPerWeek} onChange={e => setNewMember({...newMember, daysPerWeek: e.target.value})} className="w-full bg-gray-800 text-white p-4 rounded-xl font-bold outline-none border border-transparent focus:border-blue-500 italic"><option value="Libre">Pase Libre</option><option value="2xSem">2 Días x Sem</option><option value="3xSem">3 Días x Sem</option></select></div>
+                    <div className="space-y-1"><label className="text-[10px] font-black text-gray-500 uppercase px-2">Nacimiento</label><input type="date" value={newMember.birthdate} onChange={e => setNewMember({...newMember, birthdate: e.target.value})} className="w-full bg-gray-800 text-white p-4 rounded-xl font-bold outline-none border border-transparent focus:border-blue-500" /></div>
+                  </div>
+                  <button className="w-full bg-blue-600 text-white py-5 rounded-xl font-black italic hover:bg-blue-700 transition-all uppercase flex items-center justify-center gap-2">Siguiente: Confirmar Pago</button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {adminTab === 'database' && (
+            <div className="max-w-4xl mx-auto space-y-6">
+              <div className="bg-rose-900/10 border border-rose-900/30 p-6 rounded-2xl flex items-center gap-4"><AlertTriangle className="text-rose-500" /><div><p className="text-rose-500 font-black text-xs uppercase italic">Zona Peligrosa</p><p className="text-gray-500 text-[10px] font-bold uppercase">Edición directa y borrado de socios. Usar con precaución.</p></div></div>
+              <div className="bg-gray-900 border border-gray-800 rounded-[2rem] overflow-hidden">
+                <div className="p-4 border-b border-gray-800 flex justify-between items-center px-8"><h3 className="text-white font-black uppercase text-xs">Ajustes Rápidos</h3><div className="text-gray-500 text-[10px] uppercase font-bold">{members.length} Socios en total</div></div>
+                <div className="divide-y divide-gray-800">
+                  {members.map(m => (
+                    <div key={m.id} className="p-6 flex items-center justify-between hover:bg-white/[0.01]">
+                      <div><p className="text-white font-black uppercase text-xs italic">{m.name}</p><p className="text-gray-600 text-[9px] font-bold">DNI: {m.dni} | {m.daysPerWeek}</p></div>
+                      <button onClick={async () => { if(window.confirm(`¿Eliminar definitivamente a ${m.name}?`)) { setDeletingId(m.id); await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', m.id)); setDeletingId(null); }}} className="bg-rose-600/10 text-rose-500 p-3 rounded-xl hover:bg-rose-600 hover:text-white transition-all">{deletingId === m.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    );
+  }
+}
